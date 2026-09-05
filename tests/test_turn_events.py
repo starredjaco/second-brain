@@ -127,7 +127,10 @@ def test_turn_finish_restart_redrives_with_agent_priority(tmp_path):
         if fired:
             return
         fired.append(1)
-        ctx.session.pending_user_messages.append("[Background agent 'x' finished] report")
+        ctx.session.pending_user_inputs.append({
+            "action_type": "send_text",
+            "payload": "[Background agent 'x' finished] report",
+        })
         ctx.session.restart_turn = True
 
     rt.hooks.add("turn_finish", barrier)

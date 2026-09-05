@@ -130,6 +130,44 @@ def test_a_refusal_leaves_the_history_exactly_as_it_was():
     assert history == before
 
 
+def test_success_clears_only_plugin_state_that_opted_into_compaction(tmp_path):
+    """Working memory expires with the detailed transcript; environmental
+    preferences remain available after the summary replaces it."""
+    from pipeline.database import Database
+    from tests.support import plain_runtime
+
+    db = Database(str(tmp_path / "state-reset.db"))
+    cid = db.create_conversation("x")
+    runtime = plain_runtime(db)
+    runtime.services["compactor"] = _Compactor()
+    session = runtime.load_conversation("chat", cid)
+    session.history[:] = _history()
+    runtime.update_session_plugin_state(
+        "chat", "todo", {"items": ["x"]}, reset_on_compaction=True)
+    runtime.update_session_plugin_state(
+        "chat", "file_reads", {"a.py": 1}, reset_on_compaction=True)
+    runtime.update_session_plugin_state(
+        "chat", "run_command", {"cwd": "C:/work"})
+
+    outcome = runtime.compact_session("chat")
+
+    assert outcome["ok"] is True
+    assert "todo" not in session.plugin_state
+    assert "file_reads" not in session.plugin_state
+    assert session.plugin_state["run_command"] == {"cwd": "C:/work"}
+
+
+def test_failed_compaction_does_not_clear_opted_in_state():
+    runtime = SimpleNamespace(services={}, sessions={})
+    called = []
+    runtime.reset_compaction_plugin_state = called.append
+
+    outcome = compact_history(runtime, "chat", _history())
+
+    assert not outcome.ok
+    assert called == []
+
+
 # ──────────────────────────────────────────────────────────────────────
 # What it cost, and what it saved.
 # ──────────────────────────────────────────────────────────────────────

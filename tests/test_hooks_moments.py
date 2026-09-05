@@ -777,7 +777,8 @@ def test_starter_runs_again_for_closing_race_follow_up_turn(tmp_path):
         drives.append(len(drives) + 1)
         if len(drives) == 1:
             # Simulate the race: a message lands after the loop's final drain.
-            sess.pending_user_messages.append("leftover")
+            sess.pending_user_inputs.append(
+                {"action_type": "send_text", "payload": "leftover"})
         out.messages.append(f"reply {len(drives)}")
         sess.cs.set_priority("user")
         sess.busy = False

@@ -757,6 +757,40 @@ class BackForm(Action):
         return ActionResult(True, self.action_type, "Back.", events=[event], data={"step": step.name, FORM_NAVIGATION: True})
 
 
+def prepare_attachment(cs, content):
+    """Validate and parse one attachment message without changing turn state.
+
+    This pure preparation step is shared by the ordinary state-machine action
+    and the runtime's mid-turn queue. Parsing before enqueueing means a bad
+    extension is rejected while the submitting frontend is still present,
+    while the prepared objects can safely wait for the loop boundary.
+    """
+    content = dict(content or {})
+    items = [dict(f) for f in content.get("files") or []] or [content]
+    for item in items:
+        ext = cs.attachment_extension(item)
+        if cs.allowed_attachment_extensions and ext not in cs.allowed_attachment_extensions:
+            raise ValueError(f".{ext} attachments are not allowed for this model.")
+    parsed_items = [cs.attachment_parser(item) if cs.attachment_parser else item
+                    for item in items]
+    attachments, records = [], []
+    for one in parsed_items:
+        if not isinstance(one, dict):
+            continue
+        if one.get("attachment") is not None:
+            attachments.append(one["attachment"])
+        if one.get("record"):
+            records.append(one["record"])
+    parsed = parsed_items[0] if len(parsed_items) == 1 else {
+        "files": parsed_items,
+        "text": "\n".join(str((one or {}).get("text") or "")
+                          for one in parsed_items if isinstance(one, dict)).strip(),
+    }
+    text = str((parsed or {}).get("text") or "") if isinstance(parsed, dict) else ""
+    return {"content": content, "parsed": parsed, "text": text,
+            "records": records, "attachments": attachments}
+
+
 class SendAttachment(Action):
     """Send attachment."""
     action_type = "send_attachment"
@@ -788,35 +822,16 @@ class SendAttachment(Action):
         a refused one leaves nothing queued. Half a message is worse than
         none — the agent would answer about whichever files happened to pass.
         """
-        content = dict(self.content or {})
-        items = [dict(f) for f in content.get("files") or []] or [content]
-        for item in items:
-            ext = self.cs.attachment_extension(item)
-            if self.cs.allowed_attachment_extensions and ext not in self.cs.allowed_attachment_extensions:
-                raise self.error(ERROR_ATTACHMENT_NOT_ALLOWED, f".{ext} attachments are not allowed for this model.", extension=ext)
         self.cs.phase = PHASE_PARSING_ATTACHMENT
         try:
-            parsed_items = [self.cs.attachment_parser(item) if self.cs.attachment_parser else item
-                            for item in items]
+            prepared = prepare_attachment(self.cs, self.content)
+        except ValueError as exc:
+            raise self.error(ERROR_ATTACHMENT_NOT_ALLOWED, str(exc))
         finally:
             self.cs.reset_phase()
-        # If the parser produced an Attachment dataclass, queue it so the
-        # next agent turn can hand it to the LLM service.
-        records = []
-        for one in parsed_items:
-            if not isinstance(one, dict):
-                continue
-            if one.get("attachment") is not None:
-                self.cs.pending_attachments.append(one["attachment"])
-            if one.get("record"):
-                records.append(one["record"])
-        parsed = parsed_items[0] if len(parsed_items) == 1 else {
-            "files": parsed_items,
-            # One message, one row of text: whatever the person typed once,
-            # not a line per file. The files themselves are ``records``.
-            "text": "\n".join(str((one or {}).get("text") or "")
-                              for one in parsed_items if isinstance(one, dict)).strip(),
-        }
+        self.cs.pending_attachments.extend(prepared["attachments"])
+        content, parsed, records = (prepared["content"], prepared["parsed"],
+                                    prepared["records"])
         actor = self.cs.participants.get(self.actor_id)
         if actor and actor.kind == "user":
             self.cs.switch_priority(self.actor_id)

@@ -714,7 +714,9 @@ sdk.session.push(message, key="")    # speak INTO the conversation. Lands in
 sdk.session.push(message, title="Indexed", notify=True, level="success")
                                      # ...or as a *notification*: see below
 sdk.session.state_get(namespace="sandbox")
-sdk.session.state_set(value, namespace="sandbox")
+sdk.session.state_set(value, namespace="sandbox", reset_on_compaction=False)
+                                     # Opt in for working state whose meaning
+                                     # is lost when detailed history is summarized.
 sdk.session.cancel(key="")
 sdk.session.compact()                # summarize this session's history and
                                      # shrink what the model is shown. UNSAFE:

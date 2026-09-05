@@ -200,6 +200,11 @@ class RuntimeSession:
     # on-demand plugins to stash session-scoped state without core-defined
     # fields. Persisted with the marker.
     plugin_state: dict[str, dict] = field(default_factory=dict)
+    # Namespaces whose contents describe model-visible working context rather
+    # than durable session preferences. Plugins opt in when writing them; a
+    # successful compaction clears these because the detailed context that
+    # made them meaningful has just been replaced by a summary.
+    compaction_state_namespaces: set[str] = field(default_factory=set)
     notification_mode: str = DEFAULT_NOTIFICATION_MODE
     # What ``recover_marker`` had to repair when this session was rebuilt, as
     # ``{title, body}``. Delivered as notifications at ``open_session``; kept
@@ -248,11 +253,15 @@ class RuntimeSession:
     # persisted in to_marker(): crash recovery already tells the user their
     # in-flight message was not replayed, and a queue that silently survives
     # a restart would contradict that notice.
-    pending_user_messages: list[str] = field(default_factory=list)
+    # Typed user inputs sent while the agent is mid-turn. Each entry is
+    # ``{"action_type": "send_text" | "send_attachment", "payload": ...}``.
+    # Keeping the action type is what lets files retain their caption and
+    # attachment records instead of being flattened into a text-only queue.
+    pending_user_inputs: list[dict] = field(default_factory=list)
     # Agent actions queued by hooks/tools for the ConversationLoop to drain
     # at its next loop boundary (never mid tool-call batch): dicts of
     # ``{"name": tool_name, "args": {...}, "forced_by": <hook label>}``. The
-    # agent-side mirror of ``pending_user_messages`` — how a turn_start hook
+    # agent-side mirror of ``pending_user_inputs`` — how a turn_start hook
     # injects a tool call at the start of a turn, or a tool queues follow-up
     # work within the same turn. Guarded by ``lock``. Deliberately NOT
     # persisted in to_marker(): a queued action must not replay after a
@@ -393,6 +402,7 @@ class RuntimeSession:
             "notification_mode": self.notification_mode,
             "system_prompt_extras": self.system_prompt_extras,
             "plugin_state": self.plugin_state,
+            "compaction_state_namespaces": sorted(self.compaction_state_namespaces),
             "busy": self.busy,
         })
         return state

@@ -42,6 +42,7 @@ class ToolRegistry:
         self._lock = threading.Lock()
         self.orchestrator = None        # set after construction in main.pyw
         self.runtime = None             # ConversationRuntime, set by frontend bootstrap
+        self.command_registry = None    # set beside runtime by frontend bootstrap
 
     def register(self, tool: BaseTool):
         """Register a tool. Overwrites if name already exists."""
@@ -114,6 +115,7 @@ class ToolRegistry:
                                 tool_registry=self,
                                 orchestrator=self.orchestrator,
                                 runtime=self.runtime,
+                                command_registry=self.command_registry,
                                 session_key=session_key,
                                 user_initiated=user_initiated,
                                 current_tool_name=tool_name)

@@ -412,7 +412,12 @@ class ConversationLoop:
                     self._exit_reason = "priority_handoff"
                     break
 
-                self._drain_queued_messages(history, new_messages)
+                queued_attachments = self._drain_queued_messages(
+                    history, new_messages)
+                if queued_attachments:
+                    bundle = self._merge_bundles(
+                        bundle, AttachmentBundle.from_iterable(
+                            queued_attachments))
                 self._used_attachments_for_last_action = False
                 action_type, content = self._next_action(cs, history, bundle)
                 if not action_type:
@@ -1606,7 +1611,7 @@ class ConversationLoop:
         follows. The model reads its own plan back, sees no evidence anything
         ended, and offers to wait for results that were cancelled minutes ago.
 
-        Written here rather than queued on ``session.pending_user_messages``,
+        Written here rather than queued on ``session.pending_user_inputs``,
         which was the first attempt and was worse than the problem: that list
         is a *drive trigger*, drained by ``handle_action``'s closing-race
         check into a fresh ``send_text`` — so the notice started a whole new
@@ -1638,11 +1643,11 @@ class ConversationLoop:
         """True when this session asked for the turn to be re-driven."""
         return bool(getattr(self._session(), "restart_turn", False))
 
-    def _drain_queued_messages(self, history, new_messages) -> None:
+    def _drain_queued_messages(self, history, new_messages) -> list:
         """Absorb user messages queued while this turn was running.
 
         The busy guard in ``ConversationRuntime.handle_action`` appends
-        mid-turn ``send_text`` payloads to ``session.pending_user_messages``.
+        mid-turn text and attachment payloads to ``session.pending_user_inputs``.
         At each loop boundary (never mid tool-call batch, which would split an
         assistant/tool-result pair) they are written straight into history as
         user rows — mirroring ``inject_user_message``, NOT ``cs.enact`` (a
@@ -1652,20 +1657,38 @@ class ConversationLoop:
         end_turn shortcut in ``_next_action``.
         """
         if self._pending_tool_calls:
-            return
+            return []
         session = self._session()
-        if session is None or not getattr(session, "pending_user_messages", None):
-            return
+        if session is None or not getattr(session, "pending_user_inputs", None):
+            return []
         with session.lock:
-            queued = list(session.pending_user_messages)
-            session.pending_user_messages.clear()
+            queued = list(session.pending_user_inputs)
+            session.pending_user_inputs.clear()
         if not queued:
-            return
-        for text in queued:
+            return []
+        newly_attached = []
+        for item in queued:
+            action_type = item.get("action_type") or "send_text"
+            payload = item.get("payload")
+            if action_type == "send_attachment":
+                text = payload.get("text") or ""
+                records = list(payload.get("records") or [])
+                attached = list(payload.get("attachments") or [])
+                newly_attached.extend(attached)
+                if getattr(session.cs, "attachment_lifecycle", "per_turn") == "persistent":
+                    session.cs.pending_attachments.extend(attached)
+                msg = {"role": "user", "content": text}
+                if records:
+                    msg["attachments"] = records
+            else:
+                msg = {"role": "user", "content": (
+                    payload if isinstance(payload, str)
+                    else str((payload or {}).get("text") or ""))}
             # _record emits the SESSION_MESSAGE for each drained row.
-            self._record({"role": "user", "content": text}, history, new_messages,
+            self._record(msg, history, new_messages,
                          self._active_db, self._active_conversation_id)
         self._final_text = None
+        return newly_attached
 
     def _record(self, msg, history, new_messages, db, conversation_id):
         """Append one transcript row and announce it on the bus.

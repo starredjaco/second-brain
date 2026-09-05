@@ -751,7 +751,9 @@ class SubagentRegistry:
             return False
         try:
             with session.lock:
-                session.pending_user_messages.extend(notices)
+                session.pending_user_inputs.extend(
+                    {"action_type": "send_text", "payload": notice}
+                    for notice in notices)
         except Exception:
             logger.exception("could not queue subagent reports")
             return False

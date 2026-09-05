@@ -31,7 +31,7 @@ class FakeSession:
         self.busy = False
         self.lock = threading.RLock()
         self.cancel_event = threading.Event()
-        self.pending_user_messages: list[str] = []
+        self.pending_user_inputs: list[dict] = []
 
 
 class FakeDB:
@@ -480,8 +480,8 @@ def test_the_barrier_queues_uncollected_reports_and_asks_for_a_redrive():
                                         owner_conversation_id=7))
 
     assert registry.barrier(session) is True
-    assert len(session.pending_user_messages) == 2
-    assert all("Background agent" in m for m in session.pending_user_messages)
+    assert len(session.pending_user_inputs) == 2
+    assert all("Background agent" in m["payload"] for m in session.pending_user_inputs)
 
 
 def test_the_barrier_abstains_on_the_redriven_half():
@@ -492,9 +492,9 @@ def test_the_barrier_abstains_on_the_redriven_half():
                                     owner_conversation_id=7))
 
     assert registry.barrier(session) is True
-    session.pending_user_messages.clear()
+    session.pending_user_inputs.clear()
     assert registry.barrier(session) is False
-    assert session.pending_user_messages == []
+    assert session.pending_user_inputs == []
 
 
 def test_the_barrier_does_not_re_deliver_what_was_collected_explicitly():
@@ -506,7 +506,7 @@ def test_the_barrier_does_not_re_deliver_what_was_collected_explicitly():
 
     assert registry.collect(owner="repl")[0]["state"] == DONE
     assert registry.barrier(session) is False
-    assert session.pending_user_messages == []
+    assert session.pending_user_inputs == []
 
 
 def test_a_report_is_dropped_when_the_session_moved_conversations():
@@ -519,7 +519,7 @@ def test_a_report_is_dropped_when_the_session_moved_conversations():
     session.conversation_id = 9  # the user switched away
 
     assert registry.barrier(session) is False
-    assert session.pending_user_messages == []
+    assert session.pending_user_inputs == []
 
 
 def test_the_barrier_takes_the_children_with_it_when_the_user_cancels():
@@ -536,7 +536,7 @@ def test_the_barrier_takes_the_children_with_it_when_the_user_cancels():
     try:
         assert registry.barrier(session) is False
         assert registry.get(handle.id).state == CANCELLED
-        assert session.pending_user_messages == []
+        assert session.pending_user_inputs == []
     finally:
         release.set()
 
@@ -687,7 +687,7 @@ def test_children_are_collected_even_when_the_loop_never_reaches_a_doorway(tmp_p
         cfg.build_loop = original
         rt.subagents.stop()
 
-    assert any("Background agent" in m for m in session.pending_user_messages), (
+    assert any("Background agent" in m["payload"] for m in session.pending_user_inputs), (
         "a drive that reached no doorway abandoned its child")
 
 

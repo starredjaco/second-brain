@@ -504,10 +504,10 @@ class _Session(_Namespace):
         return self._ask(SESSION_STATE_GET, namespace=namespace, key=key)
 
     def state_set(self, value, namespace: str = "sandbox",
-                  key: str = ""):
+                  key: str = "", reset_on_compaction: bool = False):
         """Write per-session scratch state."""
         return self._ask(SESSION_STATE_SET, value=value, namespace=namespace,
-                         key=key)
+                         key=key, reset_on_compaction=reset_on_compaction)
 
     def cancel(self, key: str = ""):
         """Cancel the turn running on a session."""

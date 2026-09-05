@@ -890,7 +890,8 @@ def _session_state_set(ctx, args: dict) -> Result:
     if (bad := _need(setter, "session state")) is not None:
         return bad
     key = args.get("key") or getattr(ctx, "session_key", None)
-    setter(key, args.get("namespace") or "sandbox", args.get("value"))
+    setter(key, args.get("namespace") or "sandbox", args.get("value"),
+           reset_on_compaction=bool(args.get("reset_on_compaction")))
     return Result(data=True)
 
 

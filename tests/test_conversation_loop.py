@@ -505,13 +505,14 @@ def test_queued_message_is_absorbed_mid_turn():
     of the turn ending on the earlier final text."""
     import threading
 
-    session = SimpleNamespace(key="chat", lock=threading.RLock(), pending_user_messages=[])
+    session = SimpleNamespace(key="chat", lock=threading.RLock(), pending_user_inputs=[])
     runtime = SimpleNamespace(sessions={"chat": session})
 
     class _QueueingLLM(_FakeLLM):
         def chat(self, request, on_delta=None):
             if not self.calls:  # first call: simulate a mid-turn user message
-                session.pending_user_messages.append("wait, also do X")
+                session.pending_user_inputs.append(
+                    {"action_type": "send_text", "payload": "wait, also do X"})
             return super().chat(request, on_delta)
 
     cs = _agent_state()
@@ -527,7 +528,7 @@ def test_queued_message_is_absorbed_mid_turn():
     assert roles.index(("assistant", "First answer.")) \
         < roles.index(("user", "wait, also do X")) \
         < roles.index(("assistant", "Second answer."))
-    assert session.pending_user_messages == []
+    assert session.pending_user_inputs == []
     assert cs.turn_priority == "user"
     # The second LLM call saw the queued message in its transcript.
     assert any(m.get("content") == "wait, also do X" for m in llm.calls[1])
@@ -861,10 +862,14 @@ def test_busy_send_text_is_queued_not_rejected(tmp_path):
 
     assert out.ok
     assert out.data.get("queued") is True
-    assert session.pending_user_messages == ["hello mid-turn"]
+    assert session.pending_user_inputs == [
+        {"action_type": "send_text", "payload": "hello mid-turn"}]
 
     rt.handle_action("s", "send_text", "and another")
-    assert session.pending_user_messages == ["hello mid-turn", "and another"]
+    assert session.pending_user_inputs == [
+        {"action_type": "send_text", "payload": "hello mid-turn"},
+        {"action_type": "send_text", "payload": "and another"},
+    ]
 
 
 def test_busy_empty_text_is_still_rejected(tmp_path):
@@ -874,7 +879,41 @@ def test_busy_empty_text_is_still_rejected(tmp_path):
 
     assert not out.ok
     assert out.error["code"] == "empty_input"
-    assert session.pending_user_messages == []
+    assert session.pending_user_inputs == []
+
+
+def test_busy_attachment_is_queued_and_drained_into_the_next_model_call(tmp_path):
+    """A file sent mid-turn follows the same FIFO path as text, retaining both
+    its transcript record and the native attachment handed to the model."""
+    rt, session = _busy_runtime(tmp_path)
+    photo = Attachment(str(tmp_path / "photo.png"), ".png", "photo.png", "image")
+    session.cs.attachment_parser = lambda item: {
+        "text": item.get("caption") or "",
+        "attachment": photo,
+        "record": photo.record(),
+    }
+
+    out = rt.handle_action("s", "send_attachment", {
+        "path": photo.path, "file_name": photo.file_name,
+        "extension": photo.extension, "caption": "look at this",
+    })
+
+    assert out.ok and out.data["queued"] is True
+    assert session.pending_user_inputs[0]["action_type"] == "send_attachment"
+
+    session.busy = False
+    session.cs.set_priority("agent")
+    llm = _FakeLLM([_response(content="Seen."), _response(content="Done.")])
+    loop = ConversationLoop(llm, _FakeRegistry([]), {}, "prompt",
+                            runtime=rt, session_key="s")
+    history = [{"role": "user", "content": "first"}]
+    loop.drive(session.cs, "agent", history)
+
+    queued_row = next(row for row in history
+                      if row.get("content") == "look at this")
+    assert queued_row["attachments"][0]["file_name"] == "photo.png"
+    assert [item["file_name"] for item in llm.attachments[0]] == ["photo.png"]
+    assert session.pending_user_inputs == []
 
 
 def test_cancel_clears_the_queue(tmp_path):
@@ -894,7 +933,7 @@ def test_cancel_clears_the_queue(tmp_path):
     assert out.data["cancelled"] is True
     assert out.callable_output == []
     assert out.messages == []
-    assert session.pending_user_messages == []
+    assert session.pending_user_inputs == []
     assert session.cancel_event.is_set()
 
 
@@ -922,7 +961,8 @@ def test_end_of_turn_leftover_starts_a_fresh_turn(tmp_path):
         turns.append(list(m["content"] for m in sess.history if m["role"] == "user"))
         if len(turns) == 1:
             # Simulate the race: a message lands after the loop's final drain.
-            sess.pending_user_messages.append("leftover")
+            sess.pending_user_inputs.append(
+                {"action_type": "send_text", "payload": "leftover"})
         out.messages.append(f"reply {len(turns)}")
         # Mimic the real driver's finally-block hand-back.
         sess.cs.set_priority("user")
@@ -936,7 +976,7 @@ def test_end_of_turn_leftover_starts_a_fresh_turn(tmp_path):
     assert len(turns) == 2
     # The follow-up turn saw the leftover as a real user history row.
     assert turns[1][-1] == "leftover"
-    assert session.pending_user_messages == []
+    assert session.pending_user_inputs == []
     assert "reply 1" in out.messages and "reply 2" in out.messages
     assert session.cs.turn_priority == "user"
 

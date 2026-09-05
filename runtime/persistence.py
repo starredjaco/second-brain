@@ -171,6 +171,8 @@ def load_conversation(
         profile_override=saved_profile,
         system_prompt_extras={**dict(marker.get("system_prompt_extras") or {}), **dict(system_prompt_extras or {})},
         plugin_state=dict(marker.get("plugin_state") or {}),
+        compaction_state_namespaces=set(
+            marker.get("compaction_state_namespaces") or []),
         notification_mode=saved_mode,
         has_compaction_checkpoint=latest_compaction(rows) is not None,
         restore_notices=restore_notices,

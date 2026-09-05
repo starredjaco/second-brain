@@ -209,6 +209,9 @@ def compact_history(runtime, session_key: str | None, history, *,
         {"role": "assistant", "author": "compaction", "content": "Understood - I have the earlier context."},
         *tail,
     ]
+    reset_state = getattr(runtime, "reset_compaction_plugin_state", None)
+    if callable(reset_state) and session_key:
+        reset_state(session_key)
     if on_notice:
         on_notice(f"Compacted {old_count} messages.")
     return Compaction(

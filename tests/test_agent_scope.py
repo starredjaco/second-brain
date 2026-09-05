@@ -206,3 +206,24 @@ def test_a_registry_with_no_config_falls_back_rather_than_failing():
 
     assert registry.call_limit(registry.tools["unbounded_tool"]) == DEFAULT_TOOL_MAX_CALLS
     assert DEFAULT_TOOL_MAX_CALLS > 1
+
+
+def test_tool_context_includes_the_command_registry():
+    """Catalog tools such as Info reach command.list through their ordinary
+    tool context, not only through command and resident-service contexts."""
+    seen = []
+
+    class InspectContext(BaseTool):
+        name = "inspect_context"
+
+        def run(self, context, **kwargs):
+            seen.append(context.command_registry)
+            return ToolResult()
+
+    commands = object()
+    registry = ToolRegistry(None, {})
+    registry.command_registry = commands
+    registry.register(InspectContext())
+
+    assert registry.call("inspect_context").success
+    assert seen == [commands]

@@ -450,7 +450,7 @@ def test_an_uncancelled_turn_leaves_no_such_row(conv_runtime):
 
 def test_the_notice_does_not_start_a_new_turn(conv_runtime):
     """The bug the first attempt shipped, and the reason this row is written
-    by the loop rather than queued on ``pending_user_messages``.
+    by the loop rather than queued on ``pending_user_inputs``.
 
     That list is a *drive trigger*: ``handle_action``'s closing-race check
     pops it and dispatches it as a fresh ``send_text``. So the notice started
@@ -488,7 +488,7 @@ def test_the_notice_does_not_start_a_new_turn(conv_runtime):
 
     assert not turn.is_alive()
     assert len(calls) == 1
-    assert session.pending_user_messages == []
+    assert session.pending_user_inputs == []
 
 
 def test_the_notice_is_in_front_of_the_model_on_the_next_turn(conv_runtime):

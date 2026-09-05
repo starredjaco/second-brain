@@ -175,7 +175,7 @@ class ConversationRuntime:
                 # costs money, and reaches nobody.
                 stopped = self.subagents.cancel_for(session_key)
                 with session.lock:
-                    # Nothing is queued in its place. ``pending_user_messages``
+                    # Nothing is queued in its place. ``pending_user_inputs``
                     # is a *drive trigger*, not a mailbox: the closing-race
                     # drain below pops it and dispatches it as a fresh
                     # ``send_text``. Putting the "you were cancelled" notice
@@ -184,7 +184,7 @@ class ConversationRuntime:
                     # cancelled and ran to completion. Telling the model is
                     # the loop's job, on its way out; see
                     # ``ConversationLoop._record_cancellation``.
-                    session.pending_user_messages.clear()
+                    session.pending_user_inputs.clear()
                 session.cancel_event.set()
                 # The flag first, then the stoppers: everything that wakes up
                 # must find the turn already cancelled, or it carries on doing
@@ -237,16 +237,29 @@ class ConversationRuntime:
                                            "subagents_stopped": stopped})
             if action_type in {"answer_approval", "cancel"} and session.cs.phase == PHASE_APPROVING_REQUEST:
                 pass  # fall through and dispatch
-            elif action_type == "send_text":
-                # Queue mid-turn text instead of rejecting it. The running
+            elif action_type in {"send_text", "send_attachment"}:
+                # Queue mid-turn input instead of rejecting it. The running
                 # ConversationLoop drains the queue at its next boundary; if
                 # the turn ends first, handle_action starts a fresh turn with
                 # the leftovers (see the re-drive loop below).
                 text = _disp.text_of(payload)
-                if not text:
+                if action_type == "send_text" and not text:
                     return RuntimeResult(False, error={"code": "empty_input", "message": "No input."})
+                queued_payload = payload
+                if action_type == "send_attachment":
+                    from state_machine.action import prepare_attachment
+                    try:
+                        queued_payload = prepare_attachment(session.cs, payload)
+                    except Exception as exc:
+                        return RuntimeResult(False, error={
+                            "code": "attachment_failed",
+                            "message": str(exc),
+                        })
                 with session.lock:
-                    session.pending_user_messages.append(text)
+                    session.pending_user_inputs.append({
+                        "action_type": action_type,
+                        "payload": queued_payload,
+                    })
                 # A notification rather than a reply, because nothing was
                 # answered: the message was accepted and nobody has read it
                 # yet. Saying "Got it — I'll read that as soon as I finish
@@ -258,7 +271,7 @@ class ConversationRuntime:
                 # and worth nothing afterwards. What it acknowledges arrives
                 # in the transcript under its own steam a few seconds later.
                 self.notify(
-                    title="Message queued",
+                    title="Attachment queued" if action_type == "send_attachment" else "Message queued",
                     body="It will be read when the current step finishes.",
                     source="runtime", session_key=session_key, persist=False)
                 return RuntimeResult(data={"queued": True})
@@ -356,16 +369,22 @@ class ConversationRuntime:
             # leftover; the new turn's own drain absorbs any others. The
             # drives bound keeps a pathological ping-pong finite.
             with session.lock:
-                if not session.pending_user_messages:
+                if not session.pending_user_inputs:
                     break
                 if session.cs.phase != BASE_PHASE or session.cs.turn_priority != "user":
                     # Turn ended into a form/approval — a user send_text is
                     # not legal here. Leave the queue; the next agent turn's
                     # drain absorbs it.
                     break
-                text = session.pending_user_messages.pop(0)
+                queued = session.pending_user_inputs.pop(0)
                 _cfg.refresh_specs(self, session)
-                follow = self._dispatch(session, "send_text", text)
+                queued_payload = queued.get("payload")
+                if (queued["action_type"] == "send_attachment"
+                        and isinstance(queued_payload, dict)
+                        and "content" in queued_payload):
+                    queued_payload = queued_payload["content"]
+                follow = self._dispatch(
+                    session, queued["action_type"], queued_payload)
                 _persist.persist_marker(self, session)
             out.ok = out.ok and follow.ok
             out.messages.extend(follow.messages)
@@ -1350,14 +1369,33 @@ class ConversationRuntime:
         state = (session.plugin_state or {}).get(plugin) or {}
         return state.get(key, default) if key is not None else state
 
-    def update_session_plugin_state(self, session_key: str, plugin: str, patch: dict[str, Any] | None = None, **values) -> bool:
+    def update_session_plugin_state(self, session_key: str, plugin: str,
+                                    patch: dict[str, Any] | None = None,
+                                    *, reset_on_compaction: bool = False,
+                                    **values) -> bool:
         """Merge values into one plugin's session state."""
         session = self.sessions.get(session_key)
         if session is None:
             return False
         session.plugin_state.setdefault(plugin, {}).update({**(patch or {}), **values})
+        if reset_on_compaction:
+            session.compaction_state_namespaces.add(plugin)
         _persist.persist_marker(self, session)
         return True
+
+    def reset_compaction_plugin_state(self, session_key: str) -> list[str]:
+        """Clear plugin scratch namespaces that opted into compaction reset."""
+        session = self.sessions.get(session_key)
+        if session is None:
+            return []
+        cleared = []
+        for namespace in sorted(session.compaction_state_namespaces):
+            if namespace in session.plugin_state:
+                session.plugin_state.pop(namespace, None)
+                cleared.append(namespace)
+        if cleared:
+            _persist.persist_marker(self, session)
+        return cleared
 
     def push_message(self, session_key: str, text: str, *, title: str | None = None,
                      source: str | None = None, source_id: str | None = None,
