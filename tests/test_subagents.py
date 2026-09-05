@@ -14,8 +14,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from runtime.subagents import (CANCELLED, DONE, FAILED, RUNNING,
-                               SESSION_PREFIX, SubagentRegistry)
+from runtime.subagents import (BARRIER_POLL_SECONDS, BarrierOutcome, CANCELLED,
+                               DONE, FAILED, RUNNING, SESSION_PREFIX,
+                               SubagentRegistry)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -479,7 +480,7 @@ def test_the_barrier_queues_uncollected_reports_and_asks_for_a_redrive():
         settle(registry, registry.spawn(f"job {i}", owner="repl",
                                         owner_conversation_id=7))
 
-    assert registry.barrier(session) is True
+    assert registry.barrier(session) is BarrierOutcome.REPORTS_DELIVERED
     assert len(session.pending_user_inputs) == 2
     assert all("Background agent" in m["payload"] for m in session.pending_user_inputs)
 
@@ -491,9 +492,9 @@ def test_the_barrier_abstains_on_the_redriven_half():
     settle(registry, registry.spawn("job", owner="repl",
                                     owner_conversation_id=7))
 
-    assert registry.barrier(session) is True
+    assert registry.barrier(session) is BarrierOutcome.REPORTS_DELIVERED
     session.pending_user_inputs.clear()
-    assert registry.barrier(session) is False
+    assert registry.barrier(session) is BarrierOutcome.NONE
     assert session.pending_user_inputs == []
 
 
@@ -505,7 +506,7 @@ def test_the_barrier_does_not_re_deliver_what_was_collected_explicitly():
                                     owner_conversation_id=7))
 
     assert registry.collect(owner="repl")[0]["state"] == DONE
-    assert registry.barrier(session) is False
+    assert registry.barrier(session) is BarrierOutcome.NONE
     assert session.pending_user_inputs == []
 
 
@@ -518,7 +519,7 @@ def test_a_report_is_dropped_when_the_session_moved_conversations():
                                     owner_conversation_id=7))
     session.conversation_id = 9  # the user switched away
 
-    assert registry.barrier(session) is False
+    assert registry.barrier(session) is BarrierOutcome.NONE
     assert session.pending_user_inputs == []
 
 
@@ -534,11 +535,50 @@ def test_the_barrier_takes_the_children_with_it_when_the_user_cancels():
     handle = registry.spawn("slow", owner="repl", owner_conversation_id=7)
     session.cancel_event.set()
     try:
-        assert registry.barrier(session) is False
+        assert registry.barrier(session) is BarrierOutcome.NONE
         assert registry.get(handle.id).state == CANCELLED
         assert session.pending_user_inputs == []
     finally:
         release.set()
+
+
+def test_queued_user_input_wakes_the_barrier_then_waiting_resumes():
+    """A detached child does not make its parent deaf. Speaking wakes the
+    parent without collecting or cancelling the child; after the message is
+    drained, the next barrier call waits for and delivers the same child."""
+    release = threading.Event()
+
+    def turn(key, prompt, **kw):
+        release.wait(5)
+        return SimpleNamespace(ok=True, messages=["child report"], error=None)
+
+    registry, _ = registry_for(turn=turn)
+    session = FakeSession("repl", 7)
+    handle = registry.spawn("slow", owner="repl", owner_conversation_id=7)
+    outcomes = []
+    waiter = threading.Thread(
+        target=lambda: outcomes.append(registry.barrier(session)), daemon=True)
+    waiter.start()
+    time.sleep(0.05)
+
+    with session.lock:
+        session.pending_user_inputs.append({
+            "action_type": "send_text", "payload": "one more thing"})
+    waiter.join(BARRIER_POLL_SECONDS + 1)
+
+    assert outcomes == [BarrierOutcome.USER_INPUT]
+    assert not handle.collected
+    assert handle.state == RUNNING
+
+    with session.lock:
+        session.pending_user_inputs.clear()  # the parent loop drained it
+    release.set()
+    settle(registry, handle)
+
+    assert registry.barrier(session) is BarrierOutcome.REPORTS_DELIVERED
+    assert handle.collected
+    assert any("child report" in item["payload"]
+               for item in session.pending_user_inputs)
 
 
 def test_the_barrier_survives_a_broken_session():
@@ -555,7 +595,7 @@ def test_the_barrier_survives_a_broken_session():
         def lock(self):
             raise RuntimeError("no lock here")
 
-    assert registry.barrier(Hostile()) is False
+    assert registry.barrier(Hostile()) is BarrierOutcome.NONE
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -1378,8 +1378,9 @@ class ConversationLoop:
         ``sdk.agent.spawn(wait=False)`` is reachable from any script, and a
         child nobody collects is work the model paid for and never sees.
 
-        Returns True when reports were queued, which the caller turns into a
-        re-drive so the model reads them inside the same logical turn.
+        Returns True when reports or queued user input wake the parent. The
+        caller re-drives either way; an unfinished child remains behind the
+        barrier and will be waited on again after the parent responds.
         """
         registry = getattr(self.runtime, "subagents", None) if self.runtime else None
         if registry is None or session is None:

@@ -34,6 +34,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 from events.event_bus import bus
@@ -63,6 +64,18 @@ NOTICE_CAP = 16000
 
 RUNNING, DONE, FAILED, CANCELLED = "running", "done", "failed", "cancelled"
 TERMINAL = {DONE, FAILED, CANCELLED}
+
+
+class BarrierOutcome(Enum):
+    """Why the end-of-turn barrier handed control back to the loop."""
+
+    NONE = "none"
+    REPORTS_DELIVERED = "reports_delivered"
+    USER_INPUT = "user_input"
+
+    def __bool__(self) -> bool:
+        """Both reports and user input wake the parent; NONE does not."""
+        return self is not BarrierOutcome.NONE
 
 # Appended when somebody is waiting for a report: the child's final message IS
 # the deliverable. Without this a background agent writes as if a person will
@@ -682,15 +695,16 @@ class SubagentRegistry:
 
     # --- the end-of-turn barrier ----------------------------------------
 
-    def barrier(self, session) -> bool:
+    def barrier(self, session) -> BarrierOutcome:
         """Hold an ending turn open until its children report.
 
         Standing at the exit — *before* the ``end_turn`` enact — is what keeps
         the agent's priority for the whole wait: there is no window in which a
         user message can land between the halves of one logical turn.
 
-        Returns True when something was delivered, which is the loop's cue to
-        re-drive so the model reads the reports before the turn really ends.
+        Reports and queued user input both ask the loop to re-drive. Input
+        leaves unfinished children alone, so the next attempted turn ending
+        returns here and resumes the wait.
         Never raises: a barrier that breaks a turn is worse than one that
         misses a report.
         """
@@ -698,14 +712,20 @@ class SubagentRegistry:
             return self._barrier(session)
         except Exception:
             logger.exception("the subagent barrier failed")
-            return False
+            return BarrierOutcome.NONE
 
-    def _barrier(self, session) -> bool:
+    @staticmethod
+    def _has_user_input(session) -> bool:
+        """Whether the person has said something the parent has not read."""
+        with session.lock:
+            return bool(getattr(session, "pending_user_inputs", None))
+
+    def _barrier(self, session) -> BarrierOutcome:
         """The barrier proper. See :meth:`barrier`."""
         owner = str(getattr(session, "key", "") or "")
         pending = self.pending_for(owner)
         if not pending:
-            return False
+            return BarrierOutcome.NONE
 
         cancel_event = getattr(session, "cancel_event", None)
         delivered = []
@@ -716,7 +736,7 @@ class SubagentRegistry:
                 for handle in pending:
                     self.cancel(handle.id)
                     handle.collected = True
-                return False
+                return BarrierOutcome.NONE
             now = time.time()
             for handle in list(pending):
                 if handle.deadline <= now and not handle.finished:
@@ -727,11 +747,21 @@ class SubagentRegistry:
                     pending.remove(handle)
             if not pending:
                 break
+            if self._has_user_input(session):
+                # A person speaking outranks passive waiting. Deliver anything
+                # that happened to finish in the same polling slice, but keep
+                # every running child collectable and return to the loop so it
+                # can drain and answer the user.
+                queued = self._deliver(session, delivered)
+                self.forget(owner)
+                return (BarrierOutcome.REPORTS_DELIVERED if queued
+                        else BarrierOutcome.USER_INPUT)
             time.sleep(BARRIER_POLL_SECONDS)
 
         queued = self._deliver(session, delivered)
         self.forget(owner)
-        return queued
+        return (BarrierOutcome.REPORTS_DELIVERED if queued
+                else BarrierOutcome.NONE)
 
     def _deliver(self, session, handles: list[Handle]) -> bool:
         """Queue reports on the session's agent-facing message queue.

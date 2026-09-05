@@ -537,8 +537,9 @@ class ConversationRuntime:
             # iteration budget — and on those the children were abandoned with
             # their reports produced and never delivered, which is silent.
             # This is the one line every drive passes through, so the question
-            # gets asked here too. ``barrier`` settles what it collects, so
-            # the second ask on a normal turn finds nothing and costs nothing.
+            # gets asked here too. Reports and queued user input both wake the
+            # parent; the latter leaves unfinished children for the next
+            # attempted turn ending to wait on again.
             if self.subagents.barrier(session):
                 session.restart_turn = True
             if session.restart_turn and not allow_restart:
